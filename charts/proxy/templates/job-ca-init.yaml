@@ -1,0 +1,65 @@
+# Provisions the root CA secret on OpenBao (job/provision-root-ca.sh) before the Deployment.
+# Sync hook in wave 0, together with the PVC: with WaitForFirstConsumer the PVC stays Pending
+# until this pod mounts it, so the PVC cannot sit in an earlier wave. Not PreSync: on the first
+# greenfield sync the PVC does not exist yet.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: proxy-ca-init
+  labels:
+    {{- include "proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proxy-ca-init
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: proxy-ca-init
+      securityContext:
+        {{- include "proxy.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: provision
+          image: "{{ .Values.rootCa.init.image.repository }}:{{ .Values.rootCa.init.image.tag }}"
+          imagePullPolicy: {{ .Values.rootCa.init.image.pullPolicy }}
+          securityContext:
+            {{- include "proxy.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: BAO_ADDR
+              value: {{ .Values.openbao.addr | quote }}
+            - name: BAO_AUTH_PATH
+              value: {{ .Values.openbao.authPath | quote }}
+            - name: BAO_ROLE
+              value: {{ include "proxy.initRole" . | quote }}
+            - name: SECRET_PATH
+              value: {{ include "proxy.secretPath" . | quote }}
+            - name: LEGACY_CA_DIR
+              value: /legacy-certs/_ca
+            - name: CA_SUBJECT
+              value: {{ .Values.rootCa.init.subject | quote }}
+            - name: CA_DAYS
+              value: {{ .Values.rootCa.init.days | quote }}
+            - name: CA_KEY_ALG
+              value: {{ .Values.rootCa.init.keyAlg | quote }}
+          volumeMounts:
+            - name: legacy-certs
+              mountPath: /legacy-certs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: legacy-certs
+          persistentVolumeClaim:
+            claimName: {{ .Values.legacyCerts.claimName }}
+            readOnly: true
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

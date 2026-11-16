@@ -1,0 +1,75 @@
+{{- $secretPath := include "proxy.secretPath" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy
+  labels:
+    {{- include "proxy.labels" . | nindent 4 }}
+  annotations:
+    # After the PVC and the provisioning job (wave 0).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "proxy.selectorLabels" . | nindent 8 }}
+      annotations:
+        vault.security.banzaicloud.io/vault-addr: {{ .Values.openbao.addr | quote }}
+        vault.security.banzaicloud.io/vault-role: {{ include "proxy.proxyRole" . | quote }}
+        vault.security.banzaicloud.io/vault-path: {{ .Values.openbao.authPath | quote }}
+        vault.security.banzaicloud.io/vault-skip-verify: {{ .Values.openbao.skipVerify | quote }}
+    spec:
+      serviceAccountName: proxy
+      securityContext:
+        {{- include "proxy.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Explicit command: images loaded with "kind load" are in no registry, so the webhook
+          # cannot look up the image entrypoint.
+          command: ["python", "-m", "proxy"]
+          securityContext:
+            {{- include "proxy.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: PROXY_MODE
+              value: new
+            # Empty values (brownfield placeholder) make the proxy fall back to the legacy volume.
+            - name: ROOT_CA_PRIVATE_KEY
+              value: "vault:{{ $secretPath }}#private_key"
+            - name: ROOT_CA_CERTIFICATE
+              value: "vault:{{ $secretPath }}#certificate"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: app-data
+              mountPath: /app-data/certs
+            - name: legacy-certs
+              mountPath: /app/certs
+              readOnly: true
+      volumes:
+        - name: app-data
+          emptyDir:
+            {{- with .Values.appData.medium }}
+            medium: {{ . }}
+            {{- end }}
+            sizeLimit: {{ .Values.appData.sizeLimit }}
+        - name: legacy-certs
+          persistentVolumeClaim:
+            claimName: {{ .Values.legacyCerts.claimName }}
+            readOnly: true

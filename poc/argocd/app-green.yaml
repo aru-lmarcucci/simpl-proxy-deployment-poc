@@ -1,0 +1,33 @@
+# Argo CD Application for the greenfield install (new chart from the start).
+# Manual sync: scenarios run "argocd app sync --prune" explicitly (docs/plan.md §4.6).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: proxy-green
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: http://chartmuseum.chartmuseum.svc:8080
+    chart: proxy
+    targetRevision: 2.0.0
+    helm:
+      releaseName: proxy
+      # PoC-specific values. Both value blocks are set: the legacy chart reads persistence.*,
+      # the new one legacyCerts.*; each ignores the other.
+      valuesObject:
+        persistence:
+          storageClassName: standard
+          accessModes: [ReadWriteOnce]
+        legacyCerts:
+          storageClassName: standard
+          accessModes: [ReadWriteOnce]
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: proxy-green
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      # Prune only after every wave succeeded: the legacy StatefulSet keeps serving until the
+      # Deployment is healthy, and stays if the provisioning job fails (scenarios B1, E2).
+      - PruneLast=true

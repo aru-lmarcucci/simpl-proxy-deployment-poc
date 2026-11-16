@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: proxy
+  labels:
+    {{- include "proxy.labels" . | nindent 4 }}
+spec:
+  serviceName: proxy-headless
+  replicas: {{ .Values.replicaCount }}
+  # OrderedReady (default): pod-1 starts after pod-0 is Ready, so only pod-0 generates the CA.
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "proxy.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsUser: {{ .Values.uid }}
+        runAsGroup: {{ .Values.uid }}
+        runAsNonRoot: true
+        fsGroup: {{ .Values.uid }}
+      containers:
+        - name: proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PROXY_MODE
+              value: legacy
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: certs
+              mountPath: /app/certs
+      volumes:
+        - name: certs
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.claimName }}

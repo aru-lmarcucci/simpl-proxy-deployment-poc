@@ -1,0 +1,8 @@
+# Single-node kind cluster for the PoC. The node image is pinned in versions.env (KIND_NODE_IMAGE)
+# and passed by setup.sh with --image. Default StorageClass: "standard" (local-path,
+# WaitForFirstConsumer), which on one node lets several pods mount a ReadWriteOnce PVC.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: proxy-poc
+nodes:
+  - role: control-plane

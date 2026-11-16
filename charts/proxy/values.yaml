@@ -1,0 +1,48 @@
+replicaCount: 2
+
+image:
+  repository: proxy-stub
+  tag: poc
+  pullPolicy: IfNotPresent
+
+# Same UID as the legacy chart: brownfield files on the volume must stay readable.
+uid: 10001
+
+# Legacy volume, mounted read-only on /app/certs. Its spec must match the legacy chart exactly:
+# accessModes, storageClassName, volumeName and selector are immutable, size can only grow.
+legacyCerts:
+  claimName: proxy-certs
+  accessModes:
+    - ReadWriteOnce
+  # Empty: omitted from the spec, the cluster default StorageClass is used.
+  storageClassName: ""
+  size: 1Gi
+  # Test only (scenario E6): false drops the PVC from the rendered manifests.
+  renderPvc: true
+
+# Per-instance working directory (/app-data/certs). medium: "" (node disk) or Memory.
+appData:
+  medium: ""
+  sizeLimit: 100Mi
+
+openbao:
+  addr: http://openbao.openbao.svc:8200
+  authPath: kubernetes
+  skipVerify: true
+  # OpenBao role used by the proxy pods (vault-secrets-webhook). Default: proxy-<namespace>.
+  proxyRole: ""
+
+rootCa:
+  # KV v2 API path of the secret. Default: secret/data/proxy/<namespace>/root-ca.
+  secretPath: ""
+  # Provisioning job (Argo CD Sync hook).
+  init:
+    image:
+      repository: proxy-ca-init
+      tag: poc
+      pullPolicy: IfNotPresent
+    # Default: proxy-ca-init-<namespace>.
+    role: ""
+    subject: /CN=Proxy Root CA
+    days: 3650
+    keyAlg: rsa:4096

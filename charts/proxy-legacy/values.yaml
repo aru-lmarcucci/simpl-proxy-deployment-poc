@@ -1,0 +1,17 @@
+replicaCount: 2
+
+image:
+  repository: proxy-stub
+  tag: poc
+  pullPolicy: IfNotPresent
+
+# Shared volume for the root CA and the leaf certificates (mounted RW on /app/certs).
+persistence:
+  claimName: proxy-certs
+  accessModes:
+    - ReadWriteOnce
+  # Empty: omitted from the spec, the cluster default StorageClass is used.
+  storageClassName: ""
+  size: 1Gi
+
+uid: 10001

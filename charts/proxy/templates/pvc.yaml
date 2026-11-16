@@ -1,0 +1,22 @@
+{{- if .Values.legacyCerts.renderPvc }}
+# Always created, also in greenfield (where it stays empty). Never pruned or deleted by Argo CD.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.legacyCerts.claimName }}
+  labels:
+    {{- include "proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+    argocd.argoproj.io/sync-wave: "0"
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.legacyCerts.accessModes | nindent 4 }}
+  {{- with .Values.legacyCerts.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.legacyCerts.size }}
+{{- end }}

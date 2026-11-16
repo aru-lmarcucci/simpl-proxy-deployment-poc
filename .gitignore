@@ -1,0 +1,32 @@
+# Secrets: no keys, certificates or tokens in the repo (AGENTS.md).
+# Test CAs are generated at runtime (app/tests, job tests), never committed.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jwt
+token
+kubeconfig*
+.env
+*.env.local
+
+# Python (app/: local venv for pytest)
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Helm: packages built by poc/build.sh, chart dependencies
+*.tgz
+charts/*/charts/
+
+# Local scratch and logs from poc/ scripts and scenarios
+.tmp/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
