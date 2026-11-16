@@ -10,6 +10,7 @@ assert_eq "2 running pods" "2" "${#pods[@]}"
 issued="$(http_get "$NS" "${pods[0]}" "/issue?host=a.example")" || issued="{}"
 info "evidence issue on ${pods[0]}: $issued"
 assert_eq "certificate issued on pod 1" "a.example" "$(jq -r .host <<<"$issued")"
+assert_eq "leaf written under /app/certs (emptyDir)" "/app/certs/a.example/cert.pem" "$(jq -r .path <<<"$issued")"
 assert_eq "pod 1 (${pods[0]}) has a.example" '["a.example"]' "$(http_get "$NS" "${pods[0]}" /certs | jq -c .)"
 assert_eq "pod 2 (${pods[1]}) has no certificates" '[]' "$(http_get "$NS" "${pods[1]}" /certs | jq -c .)"
 assert_summary

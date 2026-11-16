@@ -202,6 +202,24 @@ assert_pods_ca() {
   done
 }
 
+# deploy_pvcs <ns>: PVC claims mounted by the proxy Deployment (expected: none).
+deploy_pvcs() {
+  k -n "$1" get deploy proxy -o json \
+    | jq -r '[.spec.template.spec.volumes[]? | .persistentVolumeClaim.claimName // empty] | join(" ")'
+}
+
+# wipe_volume_ca <ns>: removes _ca from the PVC with a RW service pod; prints what is left.
+wipe_volume_ca() {
+  k -n "$1" run wipe-ca --image=proxy-stub:poc --image-pull-policy=IfNotPresent --restart=Never \
+    --overrides='{"apiVersion":"v1","spec":{"securityContext":{"runAsUser":10001,"runAsGroup":10001},
+      "containers":[{"name":"wipe-ca","image":"proxy-stub:poc","command":["sh","-c","rm -r /certs/_ca && ls -A /certs"],
+      "volumeMounts":[{"name":"certs","mountPath":"/certs"}]}],
+      "volumes":[{"name":"certs","persistentVolumeClaim":{"claimName":"proxy-certs"}}]}}' >/dev/null
+  k -n "$1" wait --for=jsonpath='{.status.phase}'=Succeeded pod/wipe-ca --timeout=120s >/dev/null
+  k -n "$1" logs wipe-ca | tr '\n' ' '
+  k -n "$1" delete pod wipe-ca --wait=false >/dev/null
+}
+
 # wait_deploy_ready <ns>: Deployment rolled out and all replicas ready.
 wait_deploy_ready() { k -n "$1" rollout status deploy/proxy --timeout=300s >/dev/null; }
 

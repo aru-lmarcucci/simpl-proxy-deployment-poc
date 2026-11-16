@@ -8,8 +8,8 @@ require_context
 
 SCENARIOS=(
   g1-create-sync g2-resync g3-issue-local g4-scale g5-restart
-  b0-legacy b1-migrate b2-resync b3-move-ca b4-resync
-  e1-lost-volume-ca e2-incomplete-volume e3-partial-secret e4-invalid-secret
+  b0-legacy b1-migrate b2-resync b3-lost-volume
+  e1-empty-secret e2-incomplete-volume e3-partial-secret e4-invalid-secret
   e5-no-overwrite e6-pvc-not-pruned e7-immutable-pvc
 )
 LOG_DIR="$REPO_ROOT/.tmp/scenario-logs"

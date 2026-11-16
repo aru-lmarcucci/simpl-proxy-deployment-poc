@@ -1,7 +1,7 @@
 """Root CA bootstrap (docs/plan.md §4.1).
 
-Pure logic: takes the environment and two directories, returns the loaded CA or
-raises BootstrapError. Error messages name variables and files, never values.
+Pure logic: takes the environment and the base directory, returns the loaded CA or raises
+BootstrapError. Error messages name variables, never values.
 """
 
 import base64
@@ -104,35 +104,18 @@ def write_ca(ca_dir: Path, key_pem: bytes, cert_pem: bytes) -> None:
     write_file(ca_dir / CERT_FILE, cert_pem, 0o644)
 
 
-def bootstrap(env, legacy_dir: Path, data_dir: Path, now: datetime | None = None) -> RootCA:
-    """Loads the root CA from env or from the legacy volume and copies it under data_dir/_ca.
-
-    Never writes under legacy_dir.
-    """
+def bootstrap(env, base_dir: Path, now: datetime | None = None) -> RootCA:
+    """Loads the root CA from env and writes it under base_dir/_ca."""
     key_val, cert_val = env.get(ENV_KEY), env.get(ENV_CERT)
 
-    if not _blank(key_val) and not _blank(cert_val):
-        source = "env"
-        key_pem, cert_pem = _decode_env(ENV_KEY, key_val), _decode_env(ENV_CERT, cert_val)
-        labels = (ENV_KEY, ENV_CERT)
-    elif not _blank(key_val) or not _blank(cert_val):
+    if _blank(key_val) and _blank(cert_val):
+        raise BootstrapError(f"no root CA available: {ENV_KEY}/{ENV_CERT} are empty")
+    if _blank(key_val) or _blank(cert_val):
         present, missing = (ENV_KEY, ENV_CERT) if not _blank(key_val) else (ENV_CERT, ENV_KEY)
         raise BootstrapError(f"partial configuration: {present} is set but {missing} is empty")
-    else:
-        source = "legacy-volume"
-        legacy_ca = legacy_dir / CA_DIRNAME
-        key_path, cert_path = legacy_ca / KEY_FILE, legacy_ca / CERT_FILE
-        found = [p for p in (key_path, cert_path) if p.is_file()]
-        if not found:
-            raise BootstrapError(
-                f"no root CA available: {ENV_KEY}/{ENV_CERT} are empty and {legacy_ca} has no CA files"
-            )
-        if len(found) == 1:
-            raise BootstrapError(f"incomplete CA on legacy volume: only {found[0]} is present")
-        key_pem, cert_pem = key_path.read_bytes(), cert_path.read_bytes()
-        labels = (str(key_path), str(cert_path))
 
-    key, cert = parse(key_pem, cert_pem, *labels)
+    key_pem, cert_pem = _decode_env(ENV_KEY, key_val), _decode_env(ENV_CERT, cert_val)
+    key, cert = parse(key_pem, cert_pem, ENV_KEY, ENV_CERT)
     validate(key, cert, now)
-    write_ca(data_dir / CA_DIRNAME, key_pem, cert_pem)
-    return RootCA(key=key, cert=cert, source=source)
+    write_ca(base_dir / CA_DIRNAME, key_pem, cert_pem)
+    return RootCA(key=key, cert=cert, source="env")

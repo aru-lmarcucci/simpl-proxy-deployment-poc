@@ -1,6 +1,6 @@
 apiVersion: v2
 name: proxy
-description: Proxy, new chart (Deployment, root CA from OpenBao with legacy volume fallback). docs/plan.md §4.5.
+description: Proxy, new chart (Deployment, root CA from OpenBao, legacy CA imported by a job). docs/plan.md §4.5.
 type: application
 version: 2.0.0
 appVersion: "poc"

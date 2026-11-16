@@ -40,7 +40,8 @@ spec:
           env:
             - name: PROXY_MODE
               value: new
-            # Empty values (brownfield placeholder) make the proxy fall back to the legacy volume.
+            # The only source of the root CA: the provisioning job fills the secret (generated in
+            # greenfield, imported from the legacy volume in brownfield). No volume mount.
             - name: ROOT_CA_PRIVATE_KEY
               value: "vault:{{ $secretPath }}#private_key"
             - name: ROOT_CA_CERTIFICATE
@@ -57,19 +58,13 @@ spec:
               path: /healthz
               port: http
           volumeMounts:
-            - name: app-data
-              mountPath: /app-data/certs
-            - name: legacy-certs
+            # Per-instance working directory, same path as the legacy chart (where it was the PVC).
+            - name: certs
               mountPath: /app/certs
-              readOnly: true
       volumes:
-        - name: app-data
+        - name: certs
           emptyDir:
-            {{- with .Values.appData.medium }}
+            {{- with .Values.certsDir.medium }}
             medium: {{ . }}
             {{- end }}
-            sizeLimit: {{ .Values.appData.sizeLimit }}
-        - name: legacy-certs
-          persistentVolumeClaim:
-            claimName: {{ .Values.legacyCerts.claimName }}
-            readOnly: true
+            sizeLimit: {{ .Values.certsDir.sizeLimit }}

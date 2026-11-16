@@ -1,8 +1,9 @@
 # PoC: root CA del proxy da OpenBao
 
-Dimostra che il nuovo chart del proxy (Deployment, root CA iniettata da OpenBao con fallback sul
-volume legacy) funziona in automatico sia in installazioni nuove sia in quelle esistenti, su un
-cluster kind locale. Il proxy è sostituito da uno stub.
+Dimostra che il nuovo chart del proxy (Deployment, root CA iniettata da OpenBao; nelle
+installazioni esistenti un job importa in OpenBao la CA del volume legacy) funziona in automatico
+sia in installazioni nuove sia in quelle esistenti, su un cluster kind locale. Il proxy è
+sostituito da uno stub.
 
 Dettagli in [docs/plan.md](docs/plan.md), esiti in [docs/results.md](docs/results.md).
 

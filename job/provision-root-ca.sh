@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provisions the proxy root CA secret on OpenBao (docs/plan.md §4.2).
 #
-#   legacy CA on the volume, secret absent  -> empty placeholder
+#   legacy CA on the volume, secret absent  -> import the volume CA as-is
 #   no CA on the volume,     secret absent  -> generate a CA and store it
 #   secret present                          -> nothing (never overwrites)
 #
@@ -93,23 +93,36 @@ write_secret() {
 }
 
 fingerprint() {
-  openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f'
+  local out
+  out="$(openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null)" || return 1
+  cut -d= -f2 <<<"$out" | tr -d : | tr 'A-F' 'a-f'
 }
 
 if [[ "$secret" != absent ]]; then
-  case "$volume/$secret" in
-    present/data)    warn "secret has data: the proxy will use the CA from OpenBao, not the one on the legacy volume" ;;
-    absent/empty)    warn "secret is an empty placeholder and the legacy volume has no CA: the proxy will fail (no root CA available)" ;;
-    */partial)       warn "secret has only one of private_key/certificate: the proxy will fail (partial configuration)" ;;
+  case "$secret" in
+    empty)   warn "secret has empty values: the proxy will fail (no root CA available)" ;;
+    partial) warn "secret has only one of private_key/certificate: the proxy will fail (partial configuration)" ;;
   esac
   log "RESULT: noop"
   exit 0
 fi
 
-if [[ "$volume" == present ]]; then
-  jq -n '{options: {cas: 0}, data: {private_key: "", certificate: ""}}' >"$WORK/body.json"
+# store_ca <key file> <cert file> <result>: create-only write of the PEM files, base64 encoded.
+store_ca() {
+  base64 <"$1" | tr -d '\n' >"$WORK/ca.key.b64"
+  base64 <"$2" | tr -d '\n' >"$WORK/ca.crt.b64"
+  jq -n --rawfile k "$WORK/ca.key.b64" --rawfile c "$WORK/ca.crt.b64" \
+    '{options: {cas: 0}, data: {private_key: $k, certificate: $c}}' >"$WORK/body.json"
+  rm -f "$WORK/ca.key.b64" "$WORK/ca.crt.b64"
   write_secret "$WORK/body.json"
-  log "RESULT: placeholder-created"
+  log "FINGERPRINT_SHA256: $(fingerprint "$2" || echo unavailable)"
+  log "RESULT: $3"
+}
+
+if [[ "$volume" == present ]]; then
+  # Imported as-is: if the legacy CA is broken, the proxy reports it at startup.
+  log "importing the root CA from the legacy volume"
+  store_ca "$key_file" "$cert_file" ca-imported
   exit 0
 fi
 
@@ -120,11 +133,4 @@ openssl req -x509 -newkey "$CA_KEY_ALG" -nodes -sha256 -days "$CA_DAYS" -subj "$
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
   -addext "subjectKeyIdentifier=hash" 2>/dev/null \
   || die "openssl failed to generate the root CA"
-base64 <"$WORK/ca.key" | tr -d '\n' >"$WORK/ca.key.b64"
-base64 <"$WORK/ca.crt" | tr -d '\n' >"$WORK/ca.crt.b64"
-jq -n --rawfile k "$WORK/ca.key.b64" --rawfile c "$WORK/ca.crt.b64" \
-  '{options: {cas: 0}, data: {private_key: $k, certificate: $c}}' >"$WORK/body.json"
-rm -f "$WORK/ca.key" "$WORK/ca.key.b64" "$WORK/ca.crt.b64"
-write_secret "$WORK/body.json"
-log "FINGERPRINT_SHA256: $(fingerprint "$WORK/ca.crt")"
-log "RESULT: ca-generated"
+store_ca "$WORK/ca.key" "$WORK/ca.crt" ca-generated

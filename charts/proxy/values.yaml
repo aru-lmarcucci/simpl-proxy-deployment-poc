@@ -5,10 +5,11 @@ image:
   tag: poc
   pullPolicy: IfNotPresent
 
-# Same UID as the legacy chart: brownfield files on the volume must stay readable.
+# Same UID as the legacy chart: the provisioning job must be able to read the brownfield CA files.
 uid: 10001
 
-# Legacy volume, mounted read-only on /app/certs. Its spec must match the legacy chart exactly:
+# Legacy volume, mounted read-only by the provisioning job only (to import the brownfield CA).
+# Its spec must match the legacy chart exactly:
 # accessModes, storageClassName, volumeName and selector are immutable, size can only grow.
 legacyCerts:
   claimName: proxy-certs
@@ -20,8 +21,8 @@ legacyCerts:
   # Test only (scenario E6): false drops the PVC from the rendered manifests.
   renderPvc: true
 
-# Per-instance working directory (/app-data/certs). medium: "" (node disk) or Memory.
-appData:
+# Per-instance working directory (emptyDir on /app/certs). medium: "" (node disk) or Memory.
+certsDir:
   medium: ""
   sizeLimit: 100Mi
 

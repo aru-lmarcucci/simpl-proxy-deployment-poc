@@ -1,7 +1,9 @@
 """Proxy stub entrypoint: root CA bootstrap, then a tiny HTTP server (docs/plan.md §4.1).
 
-PROXY_MODE=new (default): root CA from env or legacy volume, base dir /app-data/certs.
-PROXY_MODE=legacy: current behaviour, base dir /app/certs, generates the CA if missing.
+Base dir /app/certs in both modes (a per-instance emptyDir in the new chart, the shared PVC in
+the legacy one).
+PROXY_MODE=new (default): root CA from env only, written to /app/certs/_ca.
+PROXY_MODE=legacy: current behaviour, generates the CA in /app/certs/_ca if missing.
 """
 
 import json
@@ -24,8 +26,7 @@ from .bootstrap import CA_DIRNAME, CERT_FILE, KEY_FILE, BootstrapError, RootCA, 
 
 PORT = 8080
 # Overridable only for local tests.
-LEGACY_DIR = Path(os.environ.get("PROXY_LEGACY_DIR", "/app/certs"))
-DATA_DIR = Path(os.environ.get("PROXY_DATA_DIR", "/app-data/certs"))
+BASE_DIR = Path(os.environ.get("PROXY_BASE_DIR", "/app/certs"))
 
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 
@@ -167,9 +168,9 @@ def main() -> int:
     mode = os.environ.get("PROXY_MODE", "new")
     try:
         if mode == "new":
-            ca, base_dir = bootstrap(os.environ, LEGACY_DIR, DATA_DIR), DATA_DIR
+            ca = bootstrap(os.environ, BASE_DIR)
         elif mode == "legacy":
-            ca, base_dir = legacy_bootstrap(LEGACY_DIR), LEGACY_DIR
+            ca = legacy_bootstrap(BASE_DIR)
         else:
             raise BootstrapError(f"unknown PROXY_MODE '{mode}' (expected 'new' or 'legacy')")
     except BootstrapError as e:
@@ -179,7 +180,7 @@ def main() -> int:
     log({**ca.log_record(), "mode": mode})
     # PID 1 in a container ignores SIGTERM without a handler.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(Issuer(ca, base_dir)))
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(Issuer(ca, BASE_DIR)))
     log({"event": "listening", "port": PORT})
     server.serve_forever()
     return 0

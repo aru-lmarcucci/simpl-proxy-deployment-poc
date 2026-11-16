@@ -1,4 +1,5 @@
-# Provisions the root CA secret on OpenBao (job/provision-root-ca.sh) before the Deployment.
+# Provisions the root CA secret on OpenBao (job/provision-root-ca.sh) before the Deployment:
+# imports the CA from the legacy volume if present, otherwise generates one.
 # Sync hook in wave 0, together with the PVC: with WaitForFirstConsumer the PVC stays Pending
 # until this pod mounts it, so the PVC cannot sit in an earlier wave. Not PreSync: on the first
 # greenfield sync the PVC does not exist yet.

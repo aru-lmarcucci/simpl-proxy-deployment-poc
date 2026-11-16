@@ -26,6 +26,12 @@ assert_contains "secret path defaults to the release namespace" "$new_manifest" 
   "vault:secret/data/proxy/$NS/root-ca#private_key"
 assert_contains "init role defaults to proxy-ca-init-<ns>" "$new_manifest" "proxy-ca-init-$NS"
 assert_contains "proxy role defaults to proxy-<ns>" "$new_manifest" "vault-role: \"proxy-$NS\""
+assert_not_contains "Deployment mounts no PVC (only the job does)" \
+  "$(helm template proxy "$NEW" -n "$NS" --show-only templates/deployment.yaml)" "persistentVolumeClaim"
+assert_contains "Deployment: emptyDir on /app/certs" \
+  "$(helm template proxy "$NEW" -n "$NS" --show-only templates/deployment.yaml)" "mountPath: /app/certs"
+assert_contains "the job mounts the legacy PVC" \
+  "$(helm template proxy "$NEW" -n "$NS" --show-only templates/job-ca-init.yaml)" "claimName: proxy-certs"
 assert_not_contains "no PVC when renderPvc=false" \
   "$(helm template proxy "$NEW" -n "$NS" --set legacyCerts.renderPvc=false)" "kind: PersistentVolumeClaim"
 

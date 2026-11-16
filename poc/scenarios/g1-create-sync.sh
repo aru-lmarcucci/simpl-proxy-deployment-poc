@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # G1: greenfield, first sync of proxy-green (chart 2.0.0). The job generates the CA in OpenBao,
-# the proxy pods load it from env, the PVC stays empty.
+# the proxy pods load it from env. The PVC stays empty and only the job mounts it.
 # shellcheck source-path=SCRIPTDIR source=common.sh
 source "$(dirname "$0")/common.sh"
 NS=proxy-green
@@ -25,7 +25,8 @@ pod="$(proxy_pods "$NS" | head -n1)"
 info "evidence injected env ($pod): $(injected_env "$NS" "$pod")"
 
 assert_eq "PVC proxy-certs Bound" "Bound" "$(k -n "$NS" get pvc proxy-certs -o jsonpath='{.status.phase}')"
-assert_eq "PVC proxy-certs empty" "" "$(k -n "$NS" exec "$pod" -c proxy -- ls -A /app/certs)"
+assert_contains "job: PVC proxy-certs has no CA" "$(job_logs "$NS")" "legacy volume: absent"
+assert_eq "Deployment mounts no PVC" "" "$(deploy_pvcs "$NS")"
 
 state_set FP_GREEN "$fp"
 assert_summary

@@ -1,4 +1,4 @@
-# Piano della PoC: root CA del proxy da OpenBao, con fallback su volume
+# Piano della PoC: root CA del proxy da OpenBao, con import della CA legacy
 
 ## 1. Contesto
 
@@ -14,28 +14,37 @@ StatefulSet.
 
 ### Soluzione scelta (dal task di refactoring)
 
+> **Aggiornata il 2026-11-16 (Fase 7).** Il design iniziale prevedeva, in brownfield, un secret
+> placeholder con valori vuoti e il fallback del proxy sul volume legacy montato in sola lettura.
+> Poiché il job legge già il volume per decidere, ora **importa** la CA legacy in OpenBao: il
+> proxy legge la CA sempre e solo dalle env var e non monta più il PVC. Di conseguenza la cartella
+> di lavoro resta `/app/certs` (ora un `emptyDir`): non serve più un path distinto
+> `/app-data/certs`. Il task di refactoring (`TASK.md`) viene aggiornato di conseguenza. Il
+> design iniziale non è mai andato in produzione, quindi non esistono secret placeholder da
+> convertire.
+
 **Applicazione**
 1. All'avvio legge `ROOT_CA_PRIVATE_KEY` e `ROOT_CA_CERTIFICATE` (PEM **codificate in base64**).
    Se entrambe sono presenti e non vuote, le decodifica e le scrive in
-   `/app-data/certs/_ca/private-key.pem` e `/app-data/certs/_ca/certificate.pem`.
-2. Altrimenti legge gli stessi file da `/app/certs/_ca` (il volume legacy) e li copia nel nuovo path.
+   `/app/certs/_ca/private-key.pem` e `/app/certs/_ca/certificate.pem`, gli stessi path di oggi.
+2. Altrimenti **esce con errore**. Non genera più la CA da sola.
 3. Logga da quale fonte ha inizializzato la root CA.
-4. Se dopo i passi precedenti i file in `/app-data/certs/_ca` non esistono, **esce con errore**.
-   Non genera più la CA da sola.
-5. Da qui in poi legge e scrive i certificati sotto `/app-data/certs`. Il resto del codice non cambia.
+4. La base dir dei certificati resta `/app/certs`: il resto del codice non cambia.
 
 **Deploy**
 - Deployment al posto di StatefulSet.
-- `emptyDir` su `/app-data/certs`, uno per istanza.
-- PVC legacy montato **in sola lettura** (`readOnly: true` sul mount) su `/app/certs`, condiviso.
+- `emptyDir` su `/app/certs`, uno per istanza. Il Deployment **non monta** il PVC legacy.
 - Env var iniettate da OpenBao con riferimenti `vault:...`.
+- Il PVC legacy resta nel chart (mai eliminato) e lo monta, in sola lettura, solo il job.
 - Un job eseguito da Argo CD prima del proxy provvede i secret su OpenBao:
-  - file CA presenti sul PVC e secret assente → crea il secret con valori **vuoti** (placeholder);
+  - file CA presenti sul PVC e secret assente → **importa** i file nel secret, così come sono;
   - file CA assenti e secret assente → genera una CA e crea il secret con i dati.
 
 **Risultati attesi**
-- Greenfield: la CA arriva da OpenBao tramite env var. Senza env var né file, il proxy fallisce.
-- Brownfield: le env var sono vuote (placeholder) e la CA si legge dal volume, come prima.
+- Greenfield: la CA generata dal job arriva da OpenBao tramite env var.
+- Brownfield: al primo sync del nuovo chart il job importa la CA del volume; il proxy la riceve
+  da env var, con lo stesso fingerprint. Da lì in poi la CA sul volume non serve più.
+- Senza env var il proxy fallisce.
 - Il prune di Argo CD non elimina il PVC esistente.
 - I certificati foglia diventano effimeri: non sopravvivono a scale-to-0 o redeploy.
 
@@ -48,8 +57,9 @@ Dimostrare, **esclusivamente su un cluster kind locale** (`proxy-poc`), che:
 3. l'ordine imposto da Argo CD (sync wave e hook) funziona anche al primo deploy greenfield e con
    una StorageClass `WaitForFirstConsumer`;
 4. la migrazione brownfield (StatefulSet legacy → Deployment) mantiene **lo stesso PVC** (stesso
-   UID) e **la stessa CA** (stesso fingerprint);
-5. l'iniezione `vault:` con valori vuoti produce env var vuote, che lo stub tratta come assenti;
+   UID) e **la stessa CA** (stesso fingerprint), importata dal job in OpenBao;
+5. dopo la migrazione il proxy non dipende più dal volume: non lo monta e funziona anche se la CA
+   sul PVC sparisce;
 6. tutte le repliche usano la stessa CA e i certificati foglia sono locali a ogni istanza.
 
 ### Fuori scope
@@ -143,30 +153,30 @@ matrice: niente framework, configurazione, retry o astrazioni. Due moduli: `boot
 
 **Bootstrap in modalità `new`.** Le costanti dei path sono configurabili via env solo per i test.
 
-| `ROOT_CA_PRIVATE_KEY` | `ROOT_CA_CERTIFICATE`       | File in `/app/certs/_ca` | Esito                                                      | Fonte nel log   |
-| --------------------- | --------------------------- | ------------------------ | ---------------------------------------------------------- | --------------- |
-| non vuota             | non vuota                   | indifferente             | decodifica base64, valida, scrive in `/app-data/certs/_ca` | `env`           |
-| non vuota             | vuota/assente (o viceversa) | indifferente             | **errore**: configurazione parziale                        | –               |
-| vuote/assenti         | vuote/assenti               | entrambi presenti        | valida, copia in `/app-data/certs/_ca`                     | `legacy-volume` |
-| vuote/assenti         | vuote/assenti               | uno solo presente        | **errore**: CA incompleta sul volume                       | –               |
-| vuote/assenti         | vuote/assenti               | nessuno                  | **errore**: nessuna root CA disponibile                    | –               |
+| `ROOT_CA_PRIVATE_KEY` | `ROOT_CA_CERTIFICATE`       | Esito                                                      | Fonte nel log |
+| --------------------- | --------------------------- | ---------------------------------------------------------- | ------------- |
+| non vuota             | non vuota                   | decodifica base64, valida, scrive in `/app/certs/_ca`      | `env`         |
+| non vuota             | vuota/assente (o viceversa) | **errore**: configurazione parziale                        | –             |
+| vuote/assenti         | vuote/assenti               | **errore**: nessuna root CA disponibile                    | –             |
+
+Fino alla Fase 6 la matrice aveva anche il fallback sul volume legacy (`source=legacy-volume`),
+rimosso in Fase 7.
 
 Dettagli:
 - "Vuota" significa stringa vuota o fatta solo di spazi bianchi.
 - Prima della decodifica base64 lo stub rimuove spazi e a-capo dal valore. Un base64 non valido o
   un PEM non valido produce errore, con un messaggio che nomina la variabile ma **non** il valore.
-- **Validazione**, identica per entrambe le fonti:
+- **Validazione**:
   - la chiave privata corrisponde alla chiave pubblica del certificato;
   - il certificato ha `basicConstraints CA:TRUE`;
   - il certificato è nel suo periodo di validità → altrimenti errore.
 - La chiave privata è scritta con permessi `0600`, il certificato con `0644`. La directory `_ca`
   viene creata con `0700`.
 - Log di avvio, una riga strutturata (JSON) di questo tipo:
-  `{"event":"root_ca_loaded","source":"env|legacy-volume","fingerprint_sha256":"…","subject":"…","not_after":"…"}`.
+  `{"event":"root_ca_loaded","source":"env","fingerprint_sha256":"…","subject":"…","not_after":"…"}`.
 - In caso di errore: messaggio chiaro su stderr ed **exit code 1**, prima di aprire la porta HTTP.
   Il pod finisce in `CrashLoopBackOff`, ed è il comportamento voluto.
-- Il bootstrap non scrive **mai** sotto `/app/certs` in modalità `new`. Il mount è comunque in
-  sola lettura.
+- In modalità `new` lo stub non legge né scrive `/app/certs`, che non è montato.
 
 **Server HTTP** (porta 8080, stdlib `http.server`):
 - `GET /healthz` → `200 ok`.
@@ -208,8 +218,8 @@ da "accesso negato" (403) senza interpretare messaggi di errore.
 - `CA_KEY_ALG`, default `rsa:4096`.
 
 **Formato del secret** (KV v2): un solo path con due chiavi, `private_key` e `certificate`.
-Ciascuna contiene la PEM codificata in base64 standard su una sola riga, oppure stringa vuota nel
-caso del placeholder.
+Ciascuna contiene la PEM codificata in base64 standard su una sola riga. In brownfield sono i file
+del volume, codificati così come sono.
 
 **Logica:**
 
@@ -226,29 +236,34 @@ caso del placeholder.
 4. decisione:
 ```
 
-| VOLUME  | SECRET           | Azione                                                                                                           | Exit |
-| ------- | ---------------- | ---------------------------------------------------------------------------------------------------------------- | ---- |
-| present | absent           | scrive il placeholder `{private_key:"", certificate:""}`                                                         | 0    |
-| present | present          | nessuna. Warning se il secret contiene dati: in quel caso il proxy userà la CA di OpenBao, non quella del volume | 0    |
-| absent  | absent           | genera la CA con openssl e scrive il secret                                                                      | 0    |
-| absent  | present con dati | nessuna                                                                                                          | 0    |
-| absent  | present vuoto    | nessuna. Warning: "il proxy fallirà, nessuna CA disponibile" (es. PVC brownfield perso)                          | 0    |
+| VOLUME      | SECRET                   | Azione                                                         | Exit |
+| ----------- | ------------------------ | -------------------------------------------------------------- | ---- |
+| present     | absent                   | importa i file del volume nel secret, senza validarli          | 0    |
+| absent      | absent                   | genera la CA con openssl e scrive il secret                    | 0    |
+| qualsiasi   | present con dati         | nessuna (es. sync dopo la migrazione, anche con PVC svuotato)  | 0    |
+| qualsiasi   | present vuoto o parziale | nessuna. Warning: "il proxy fallirà" (es. secret creato a mano) | 0    |
+
+Fino alla Fase 6, con `present / absent` il job scriveva un placeholder vuoto.
 
 Dettagli:
 - Ogni scrittura usa `{"options":{"cas":0},"data":{…}}`, cioè crea il secret solo se non esiste.
   Se la scrittura fallisce per CAS (secret creato nel frattempo, o versioni cancellate ma
   metadati ancora presenti), il job rilegge il secret: se esiste, esce con 0 (no-op); altrimenti
   esce con 1.
-- Nessuna rigenerazione automatica. Nella riga "absent / present vuoto" il job **non** genera una
-  nuova CA: rigenerare in silenzio invaliderebbe la fiducia dei client. Meglio che il proxy fallisca.
+- Nessuna rigenerazione automatica. Con un secret vuoto o parziale il job **non** genera una
+  nuova CA: rigenerare in silenzio invaliderebbe la fiducia dei client, e comunque la policy non
+  permette di sovrascrivere. Meglio che il proxy fallisca.
+- **Import senza validazione** (decisione dell'utente, Fase 7): se i file del volume sono
+  sbagliati, lo erano già per il proxy legacy. L'errore emerge all'avvio del proxy, che valida la
+  CA (§4.1). Il job controlla solo che entrambi i file esistano e non siano vuoti.
 - File temporanei in `/tmp`, montato come `emptyDir` con `medium: Memory`. Nessun `set -x`, nessun
   `echo` di chiavi o token. Il token viene passato a curl via header letto da file o variabile,
   mai sulla riga di comando di un altro processo loggato.
 - La CA generata ha le stesse estensioni attese dallo stub: `basicConstraints=critical,CA:TRUE` e
   `keyUsage=critical,keyCertSign,cRLSign`, più `subjectKeyIdentifier`. Il base64 si ottiene con
   `base64 | tr -d '\n'`, per compatibilità con busybox.
-- Output finale: una riga `RESULT: <azione>` (`placeholder-created`, `ca-generated`, `noop`), usata
-  dagli scenari per le asserzioni. Se è stata generata una CA, stampa anche il fingerprint SHA-256
+- Output finale: una riga `RESULT: <azione>` (`ca-imported`, `ca-generated`, `noop`), usata
+  dagli scenari per le asserzioni. Se ha scritto una CA, stampa anche il fingerprint SHA-256
   nello stesso formato dello stub: hex minuscolo senza `:` (es. con
   `openssl x509 -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr A-F a-f`).
 
@@ -292,7 +307,7 @@ Simula il chart attuale, quanto basta per creare lo stato brownfield:
   - `argocd.argoproj.io/sync-options: Delete=false,Prune=false`;
   - `helm.sh/resource-policy: keep`, per chi installa con la CLI di Helm;
   - `argocd.argoproj.io/sync-wave: "0"`.
-- Il chart crea il PVC **sempre**, anche in greenfield, dove resta vuoto.
+- Il chart crea il PVC **sempre**, anche in greenfield, dove resta vuoto. Lo monta solo il job.
 
 **Job `proxy-ca-init`**
 - Annotazioni:
@@ -318,10 +333,11 @@ Simula il chart attuale, quanto basta per creare lo stato brownfield:
 - `argocd.argoproj.io/sync-wave: "1"`, 2 repliche, strategia `RollingUpdate`.
 - `ServiceAccount` `proxy`.
 - Volumi:
-  - `app-data`: `emptyDir`, montato su `/app-data/certs`. Valori `appData.medium` (default `""`,
-    opzione `Memory`) e `appData.sizeLimit` (default `100Mi`). Con `Memory`, l'uso conta nel limite
-    di memoria del container.
-  - `legacy-certs`: PVC `proxy-certs`, montato su `/app/certs` con **`readOnly: true`**.
+  - `certs`: `emptyDir`, montato su `/app/certs`, lo stesso path del legacy. Valori
+    `certsDir.medium` (default `""`, opzione `Memory`) e `certsDir.sizeLimit` (default `100Mi`).
+    Con `Memory`, l'uso conta nel limite di memoria del container.
+  - nessun mount del PVC legacy (Fase 7): il Deployment è stateless e, anche con un PVC
+    `ReadWriteOnce`, le repliche possono stare su nodi diversi.
 - Env:
   ```yaml
   - name: ROOT_CA_PRIVATE_KEY
@@ -338,7 +354,7 @@ Simula il chart attuale, quanto basta per creare lo stato brownfield:
   deve leggere l'entrypoint dal registry dell'immagine, ma le immagini caricate con `kind load`
   non sono in nessun registry e la mutazione fallisce.
 - `securityContext`:
-  - utente `10001`, lo stesso del legacy, così i file brownfield sono leggibili;
+  - utente `10001`, lo stesso del legacy e del job;
   - `fsGroup: 10001`;
   - `readOnlyRootFilesystem: true`.
 - Probe: `readinessProbe` e `livenessProbe` HTTP su `/healthz`.
@@ -401,7 +417,7 @@ lasciato dai precedenti, e stampa un riepilogo finale. Il fingerprint si legge c
 
 | ID  | Azioni                                                  | Asserzioni                                                                                                                                                                                |
 | --- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G1  | crea e sincronizza `proxy-green` (2.0.0)                | job `RESULT: ca-generated`; il secret in OpenBao ha dati; tutti i pod `Ready`; `source=env`; stesso fingerprint su tutti i pod, uguale a quello stampato dal job; PVC `proxy-certs` vuoto |
+| G1  | crea e sincronizza `proxy-green` (2.0.0)                | job `RESULT: ca-generated`; il secret in OpenBao ha dati; tutti i pod `Ready`; `source=env`; stesso fingerprint su tutti i pod, uguale a quello stampato dal job; PVC `proxy-certs` senza CA (log del job); il Deployment non monta PVC |
 | G2  | nuovo sync                                              | job `RESULT: noop`; fingerprint invariato                                                                                                                                                 |
 | G3  | `/issue?host=a.example` sul pod 1; `/certs` su entrambi | il certificato esiste solo sul pod 1 (`emptyDir` per istanza)                                                                                                                             |
 | G4  | scale a 0, poi a 2                                      | fingerprint invariato; `/certs` vuoto su tutti i pod (certificati effimeri)                                                                                                               |
@@ -412,10 +428,13 @@ lasciato dai precedenti, e stampa un riepilogo finale. Il fingerprint si legge c
 | ID  | Azioni                                                                                                                                         | Asserzioni                                                                                                                                                                                                                                                                                                                    |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | B0  | sincronizza `proxy-brown` con 1.0.0 (legacy); `/issue?host=b.example`                                                                          | StatefulSet `Ready`; la CA esiste sul PVC; salva fingerprint (`FP_LEGACY`) e UID del PVC (`PVC_UID`); nessun secret in OpenBao                                                                                                                                                                                                |
-| B1  | `targetRevision: 2.0.0`, sync con `--prune`                                                                                                    | job `RESULT: placeholder-created`; secret con valori vuoti; StatefulSet e Service headless eliminati; PVC con **lo stesso UID** `PVC_UID`; pod `Ready` con `source=legacy-volume` e fingerprint `FP_LEGACY` su tutti; il pod non scrive su `/app/certs` (un tentativo di scrittura via `kubectl exec` fallisce con read-only) |
-| B2  | nuovo sync                                                                                                                                     | job `RESULT: noop`; secret ancora vuoto; fingerprint invariato                                                                                                                                                                                                                                                                |
-| B3  | migrazione: copia nel secret la CA **del volume** (script di supporto con il root token, `cas` sulla versione corrente), poi `rollout restart` | `source=env`; fingerprint ancora `FP_LEGACY`                                                                                                                                                                                                                                                                                  |
-| B4  | nuovo sync dopo B3                                                                                                                             | job `RESULT: noop`; il secret **non** è stato svuotato (stessa versione KV)                                                                                                                                                                                                                                                   |
+| B1  | `targetRevision: 2.0.0`, sync con `--prune`                                                                                                    | job `RESULT: ca-imported` con fingerprint `FP_LEGACY`; secret con dati; StatefulSet e Service headless eliminati; PVC con **lo stesso UID** `PVC_UID`; il Deployment non monta PVC; env iniettate non vuote; pod `Ready` con `source=env` e fingerprint `FP_LEGACY` su tutti; sempre almeno un pod pronto durante il sync |
+| B2  | nuovo sync                                                                                                                                     | job `RESULT: noop` senza warning; versione KV invariata; fingerprint invariato                                                                                                                                                                                                                                                |
+| B3  | si cancella `_ca` dal PVC con un pod di servizio RW, poi sync e `rollout restart`                                                              | job `RESULT: noop` (volume `absent`, secret con dati) senza warning; versione KV invariata; pod `source=env` con `FP_LEGACY`                                                                                                                                                                                                  |
+
+Fino alla Fase 6 B1 creava un placeholder vuoto (`source=legacy-volume`), B3 copiava a mano la CA
+del volume nel secret e B4 verificava il sync successivo. Con l'import automatico B3 e B4 di allora
+non servono più: il nuovo B3 verifica che, dopo la migrazione, il volume non serva più.
 
 ### Casi di errore
 
@@ -425,7 +444,7 @@ eliminati.
 
 | ID  | Preparazione                                                                                                          | Asserzioni                                                                                                       |
 | --- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| E1  | brownfield con placeholder vuoto, poi si svuota `_ca` sul PVC con un pod di servizio RW (con Deployment a 0 repliche) | job `RESULT: noop` + warning "il proxy fallirà"; pod in `CrashLoopBackOff` con log "nessuna root CA disponibile" |
+| E1  | secret con valori vuoti creato a mano, PVC senza CA (Fase 7; prima: placeholder brownfield e CA persa dal PVC)        | job `RESULT: noop` + warning "il proxy fallirà", nessuna rigenerazione; pod in `CrashLoopBackOff` con log "nessuna root CA disponibile" |
 | E2  | sul PVC resta solo `private-key.pem`                                                                                  | job in errore "CA incompleta"; sync dell'Application `Failed`; Deployment non aggiornato                         |
 | E3  | secret con `private_key` valorizzata e `certificate` vuoto                                                            | pod in errore "configurazione parziale"                                                                          |
 | E4  | secret con base64 non valido; poi con chiave e certificato non corrispondenti                                         | pod in errore con il messaggio specifico; il valore non compare nei log                                          |
@@ -433,16 +452,13 @@ eliminati.
 | E6  | il chart viene renderizzato senza la risorsa PVC (valore di test `legacyCerts.renderPvc=false`), sync con `--prune`   | il PVC **non** viene eliminato (protetto da `Prune=false`)                                                       |
 | E7  | come B1, ma con `accessModes` diverso da quello del legacy                                                            | sync fallisce per campo immutabile. Lo scenario documenta il rischio e si aspetta il fallimento                  |
 
-### Verifica dell'iniezione con valori vuoti
+### Verifica dell'iniezione
 
-In B1, prima delle asserzioni sullo stub, si verifica che `ROOT_CA_PRIVATE_KEY` e
-`ROOT_CA_CERTIFICATE` esistano e siano **vuote**. Nota di implementazione: `kubectl exec … -- env`
-mostra i valori dello spec del pod (`vault:…`), non quelli iniettati, perché `vault-env` li passa
-solo al processo che avvia. Lo scenario legge quindi `/proc/1/environ` del container e stampa solo
-le lunghezze. Il comportamento di
-`vault-env` con valori KV vuoti non è garantito dalla documentazione. Se le variabili risultano
-assenti va bene comunque, perché lo stub le tratta allo stesso modo. Se invece il container non
-parte, **fermarsi e segnalarlo** (vedi §7).
+`kubectl exec … -- env` mostra i valori dello spec del pod (`vault:…`), non quelli iniettati,
+perché `vault-env` li passa solo al processo che avvia. Gli scenari leggono quindi
+`/proc/1/environ` del container e stampano solo le lunghezze. In B1 le due variabili devono essere
+presenti e non vuote. (Fino alla Fase 6 B1 verificava l'iniezione di valori **vuoti**: vedi §7,
+punto 2.)
 
 ## 6. Fasi di lavoro
 
@@ -556,7 +572,8 @@ Note di implementazione (Fase 3):
 - ~~Da osservare in B1: Argo esegue il prune alla fine del sync~~ (ipotesi sbagliata, smentita in
   Fase 5: senza `PruneLast` il prune avviene nella wave della risorsa, vedi §4.6). Con
   `PruneLast=true` per qualche istante convivono i pod dello StatefulSet (in scrittura sul volume)
-  e quelli del Deployment (in lettura), e il Service seleziona entrambi.
+  e quelli del Deployment (in lettura fino alla Fase 7, poi senza volume), e il Service seleziona
+  entrambi.
 - Corretto un bug di `lib.sh`: `tmp_dir` chiamato dentro `$(...)` creava la cartella in una
   subshell, che restava in `/tmp`. Ora la cartella si crea quando si carica la libreria.
 
@@ -630,8 +647,8 @@ Note di implementazione (Fase 5):
   `certificate.pem` direttamente dal pod legacy, che monta il volume in scrittura.
 - E5 usa un pod con l'immagine del job e il service account `proxy-ca-init`: stampa solo i codici
   HTTP, il token resta nel pod.
-- Il `rollout restart` di B3 viene annullato dal sync di B4, che fa un secondo rollout (vedi
-  `docs/results.md`, scoperta 3, e §8).
+- Il `rollout restart` di B3 (prima della Fase 7) veniva annullato dal sync di B4, che faceva un
+  secondo rollout (vedi §8).
 
 ### Fase 6: risultati
 - [x] `docs/results.md`: per ogni scenario esito, evidenze (righe `RESULT:`, log `root_ca_loaded`,
@@ -640,6 +657,40 @@ Note di implementazione (Fase 5):
       differenze rispetto allo stub
 - [x] sezione "Da portare nei chart reali": annotazioni, wave, valori
 - [x] `README.md` riletto e allineato allo stato finale; resta minimale
+
+### Fase 7: import della CA legacy in OpenBao
+Decisione dell'utente del 2026-11-16, vedi §1. Le note delle fasi 1-6 descrivono il design
+iniziale dove citano placeholder, fallback sul volume e `source=legacy-volume` in modalità `new`.
+
+- [x] stub: modalità `new` solo da env, senza fallback sul volume (§4.1); test aggiornati
+- [x] job: `ca-imported` al posto di `placeholder-created`, senza validazione dell'import (§4.2)
+- [x] chart: il Deployment non monta più il PVC; `check-charts.sh` lo verifica (§4.5)
+- [x] scenari: G1, B1, B2 e E1 aggiornati, nuovo B3, rimossi B3 e B4 di prima (§5)
+- [x] `run-all.sh` verde da cluster pulito; `docs/results.md`, `README.md` aggiornati
+
+Note di implementazione (Fase 7):
+- Il job codifica i file del volume così come sono e stampa il fingerprint del certificato
+  importato (`unavailable` se openssl non riesce a leggerlo). Con un secret già presente, con dati,
+  non stampa più il warning "the proxy will use the CA from OpenBao": è lo stato normale dopo la
+  migrazione.
+- Testi del job utili agli scenari: `the proxy will fail`, `incomplete CA on legacy volume`,
+  `cannot create`. Lo stub in modalità `new` non produce più `incomplete CA on legacy volume`
+  (resta in modalità `legacy`).
+- Il caso "secret vuoto" non nasce più dal job: E1 lo crea a mano, per verificare che il job non
+  rigeneri la CA.
+- Esecuzione di riferimento il 2026-11-16, con la cartella di lavoro su `/app/certs`: `teardown`
+  → `setup` → `build` → `run-all` in 14 min 35 s, 16 scenari su 16, 117 asserzioni, 0 fallite.
+  Un'esecuzione intermedia (prima dello spostamento su `/app/certs`) era fallita una volta in B0
+  per `token is not valid yet` della CLI di Argo CD, subito dopo il login (salto transitorio
+  dell'orologio di WSL2): se ricapita, basta rieseguire `run-all.sh`. Dettagli in
+  `docs/results.md`.
+- **Cartella di lavoro su `/app/certs`** (decisione dell'utente, dopo l'import): senza il PVC nel
+  pod non servono due path, quindi l'`emptyDir` è montato su `/app/certs` e il proxy reale non
+  deve cambiare base dir. Lo stub usa `/app/certs` in entrambe le modalità (`PROXY_BASE_DIR` solo
+  per i test); il valore del chart `appData` diventa `certsDir`. `check-charts.sh` verifica il
+  mount e G3 il path del certificato foglia. Rischio residuo: se il nuovo chart rimontasse per
+  errore il PVC su `/app/certs`, il proxy scriverebbe sul volume condiviso; lo intercetta il
+  controllo "Deployment mounts no PVC" di `check-charts.sh`.
 
 ## 7. Punti aperti
 
@@ -650,18 +701,20 @@ fermarsi e chiedere.
    vault-secrets-webhook**. Se il cluster reale usa un altro meccanismo, le §4.5 e §5 cambiano.
 2. ~~**Comportamento di `vault-env` con valori vuoti:** da verificare in B1 (vedi §5).~~
    **Risolto in B1:** con valori KV vuoti `vault-env` (`v1.23.0`) passa al processo variabili
-   presenti e vuote, e il container parte.
+   presenti e vuote, e il container parte. Dalla Fase 7 non è più rilevante: il job non scrive
+   più valori vuoti.
 3. **Nomi dei file legacy:** si assume `/app/certs/_ca/private-key.pem` e
    `/app/certs/_ca/certificate.pem`. Da confermare sul proxy reale.
 4. **Parametri della CA:** algoritmo, durata e subject devono ricalcare quelli che il proxy reale
    usa oggi. I default della §4.2 sono provvisori.
 5. **PVC in produzione:** access mode e StorageClass reali. Il PVC legacy è una risorsa standalone
-   del chart, non un `volumeClaimTemplates`? Con `ReadWriteOnce` e repliche su nodi diversi il
-   Deployment non funziona.
+   del chart, non un `volumeClaimTemplates`? Dalla Fase 7 lo monta solo il job: con
+   `ReadWriteOnce` il vincolo riguarda solo il pod del job, che durante la migrazione deve poter
+   montare il volume insieme ai pod legacy ancora attivi (stesso nodo).
 6. **Sync policy di Argo CD in produzione** (automatica? prune automatico?): influisce sugli
    scenari E6 ed E7.
-7. **UID del container:** deve coincidere con quello che ha scritto i file brownfield, altrimenti
-   la lettura dal volume fallisce per permessi.
+7. **UID del job:** deve coincidere con quello che ha scritto i file brownfield, altrimenti
+   l'import dal volume fallisce per permessi. Dalla Fase 7 il vincolo vale solo per il job.
 8. **Path del secret su OpenBao in produzione:** convenzione di naming e mount KV in uso negli altri
    servizi.
 9. **`PruneLast=true` sulle Application reali** (emerso in Fase 5, vedi §4.6): senza questa
@@ -673,11 +726,13 @@ fermarsi e chiedere.
 
 ## 8. Da documentare per il passaggio in produzione (fuori PoC)
 
-- Procedura di migrazione di un'installazione brownfield verso OpenBao (scenario B3):
-  1. copiare nel secret la CA del volume, **non** generarne una nuova;
-  2. fare il redeploy, preferibilmente con un sync di Argo CD: un `rollout restart` viene
-     annullato dal sync successivo, che fa un secondo rollout (vedi `docs/results.md`);
-  3. verificare nel log `root_ca_loaded` che `source=env` e che il fingerprint sia invariato;
-  4. solo dopo, valutare la rimozione del PVC.
+- Migrazione di un'installazione brownfield: è automatica (scenario B1). Dopo il sync verificare
+  che il job riporti `RESULT: ca-imported` con il fingerprint della CA legacy, e che il log
+  `root_ca_loaded` dei pod abbia `source=env` e lo stesso fingerprint.
+- Rimozione del PVC legacy: dopo che tutte le installazioni sono migrate, una versione successiva
+  del chart può togliere il PVC e il mount del job. Il PVC non viene eliminato da Argo CD
+  (`Prune=false`, `Delete=false`): va cancellato a mano quando non serve più.
+- Redeploy: preferire un sync di Argo CD a un `rollout restart`, che il sync successivo annulla con
+  un secondo rollout.
 - Rotazione e scadenza della root CA: oggi non gestite.
 - Monitoraggio: alert su `CrashLoopBackOff` del proxy e sul fallimento del job di provisioning.
